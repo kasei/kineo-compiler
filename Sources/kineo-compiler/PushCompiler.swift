@@ -50,25 +50,39 @@ public class QueryCompiler {
             var child: ChildIdentifier
         }
         
+        unowned var compiler: QueryCompiler
         var ancestors: [AncestorItem]
         
-        func consume(compiler: QueryCompiler, state: PartialResultState, depth: Int) {
+        init(ancestors: [AncestorItem], compiler: QueryCompiler) {
+            self.ancestors = ancestors
+            self.compiler = compiler
+        }
+        
+        public static func == (lhs: Ancestors, rhs: Ancestors) -> Bool {
+            return lhs.ancestors == rhs.ancestors
+        }
+        
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(ancestors)
+        }
+        
+        func consume(state: PartialResultState, depth: Int) {
             if let parent = ancestors.last {
                 compiler.consume(algebra: parent.algebra, state: state, parents: self.droppingLast(), inPosition: parent.child)
             } else {
                 let indent = String(repeating: " ", count: 4*depth)
-                print("\(indent)HANDLE(result);")
+                compiler.emit(instruction: .generateResult("result"))
             }
         }
         
         func adding(_ algebra: Algebra, inPosition child: ChildIdentifier = .lhs) -> Ancestors {
             let a = ancestors + [AncestorItem(algebra: algebra, child: child)]
-            return Ancestors(ancestors: a)
+            return Ancestors(ancestors: a, compiler: compiler)
         }
         
         func droppingLast() -> Ancestors {
             let a = ancestors.dropLast()
-            return Ancestors(ancestors: Array(a))
+            return Ancestors(ancestors: Array(a), compiler: compiler)
         }
     }
     
@@ -124,6 +138,7 @@ public class QueryCompiler {
         case increment(String)
         case constant(String, String)
         case variable(String, String)
+        case generateResult(String)
         case literal(String)
     }
     
@@ -155,6 +170,8 @@ public class QueryCompiler {
             print("\(indent)var \(s) = \(val)")
         case .increment(let s):
             print("\(indent)\(s) += 1")
+        case .generateResult(let s):
+            print("\(indent)GENERATE_RESULT(\(s))")
         case .literal(let s):
             print("\(indent)\(s)")
         }
@@ -171,6 +188,11 @@ public class QueryCompiler {
         }
     }
     
+    public func compile(algebra: Algebra, activeGraph: Node) throws {
+        let parents = QueryCompiler.Ancestors(ancestors: [], compiler: self)
+        return try produce(algebra: algebra, parents: parents, activeGraph: activeGraph)
+    }
+    
     func produce(algebra: Algebra, parents: Ancestors, activeGraph: Node) throws {
         switch algebra {
         case .unionIdentity:
@@ -178,40 +200,40 @@ public class QueryCompiler {
         case .joinIdentity:
             let state = PartialResultState(distinct: true, necessarilyBound: [], potentiallyBound: [])
             emit(instruction: .constant("result", "TermResult()"))
-            parents.consume(compiler: self, state: state, depth: depth)
+            parents.consume(state: state, depth: depth)
         case let .table(cols, rows):
             let state = PartialResultState(distinct: false, necessarilyBound: [], potentiallyBound: algebra.inscope)
             let results = try evaluateTable(columns: cols, rows: rows)
             for r in results {
                 emit(instruction: .constant("result", "\(r)"))
-                parents.consume(compiler: self, state: state, depth: depth)
+                parents.consume(state: state, depth: depth)
             }
         case let .quad(qp):
             let state = PartialResultState(distinct: false, necessarilyBound:algebra.necessarilyBound, potentiallyBound: algebra.inscope)
-            emit(instruction: .forVariableIn("result", "match(\(qp))"))
-            parents.consume(compiler: self, state: state, depth: depth)
+            emit(instruction: .forVariableIn("result", "match_quad(\(qp))"))
+            parents.consume(state: state, depth: depth)
             emit(instruction: .close)
         case let .triple(tp):
             let state = PartialResultState(distinct: false, necessarilyBound: algebra.necessarilyBound, potentiallyBound: algebra.inscope)
             let qp = QuadPattern(triplePattern: tp, graph: activeGraph)
-            emit(instruction: .forVariableIn("result", "match(\(qp))"))
-            parents.consume(compiler: self, state: state, depth: depth)
+            emit(instruction: .forVariableIn("result", "match_quad(\(qp))"))
+            parents.consume(state: state, depth: depth)
             emit(instruction: .close)
         case let .bgp(tps):
             let state = PartialResultState(distinct: false, necessarilyBound: algebra.necessarilyBound, potentiallyBound: algebra.inscope)
             let qps = tps.map { QuadPattern(triplePattern: $0, graph: activeGraph) }
-            emit(instruction: .forVariableIn("result", "match(\(qps))"))
-            parents.consume(compiler: self, state: state, depth: depth)
+            emit(instruction: .forVariableIn("result", "match_bgp(\(qps))"))
+            parents.consume(state: state, depth: depth)
             emit(instruction: .close)
         case let .path(subject, pp, object):
             let state = PartialResultState(distinct: false, necessarilyBound: algebra.necessarilyBound, potentiallyBound: algebra.inscope)
-            emit(instruction: .forVariableIn("result", "pathMatch(\(subject), \(pp), \(object))"))
-            parents.consume(compiler: self, state: state, depth: depth)
+            emit(instruction: .forVariableIn("result", "match_path(\(subject), \(pp), \(object))"))
+            parents.consume(state: state, depth: depth)
             emit(instruction: .close)
         case let .service(endpoint, child, silent):
             let state = PartialResultState(distinct: false, necessarilyBound: algebra.necessarilyBound, potentiallyBound: algebra.inscope)
             emit(instruction: .forVariableIn("result", "service(\(endpoint), \(child), \(silent))"))
-            parents.consume(compiler: self, state: state, depth: depth)
+            parents.consume(state: state, depth: depth)
             emit(instruction: .close)
             
         case let .innerJoin(lhs, rhs):
@@ -257,7 +279,7 @@ public class QueryCompiler {
             emit(instruction: .assign(results, "sort(\(results), with: \(cmps))"))
             let state = PartialResultState(distinct: false, necessarilyBound:algebra.necessarilyBound, potentiallyBound: algebra.inscope)
             emit(instruction: .forVariableIn("result", results))
-            parents.consume(compiler: self, state: state, depth: depth)
+            parents.consume(state: state, depth: depth)
             emit(instruction: .close)
         case let .aggregate(child, _, aggs):
             let results = uniqueVariable("results", parents: parents)
@@ -267,12 +289,12 @@ public class QueryCompiler {
             try produce(algebra: child, parents: parents.adding(algebra), activeGraph: activeGraph)
             let g = uniqueVariable("group", parents: parents)
             emit(instruction: .forVariableIn(g, gs))
-            emit(instruction: .variable("result", "TermResult()"))
+            emit(instruction: .variable("result", "\(g).copy()"))
             for a in aggs {
-                emit(instruction: .assign("result[\(a.variableName)]", "aggregate(groups[\(g)], \(a.aggregation))"))
+                emit(instruction: .assign("result[\"\(a.variableName)\"]", "aggregate(groups[\(g)], \(a.aggregation))"))
             }
             let state = PartialResultState(distinct: false, necessarilyBound:algebra.necessarilyBound, potentiallyBound: algebra.inscope)
-            parents.consume(compiler: self, state: state, depth: depth)
+            parents.consume(state: state, depth: depth)
             emit(instruction: .close)
         case let .window(child, groups, windows):
             try produce(algebra: child, parents: parents.adding(algebra), activeGraph: activeGraph)
@@ -295,7 +317,7 @@ public class QueryCompiler {
                 emit(instruction: .listAppend("\(ht)[µ(result, \(nb))]", "result"))
             } else {
                 emit(instruction: .forVariableIn("result", "compatible(result, \(ht)[µ(result, \(nb))])"))
-                parents.consume(compiler: self, state: state, depth: depth)
+                parents.consume(state: state, depth: depth)
                 emit(instruction: .close)
             }
         case let .leftOuterJoin(lhs, rhs, expr):
@@ -312,26 +334,26 @@ public class QueryCompiler {
                 emit(instruction: .forVariableIn("result", m))
                 emit(instruction: .ifCondition("eval(result, \(expr))"))
                 emit(instruction: .increment("leftJoinCount"))
-                parents.consume(compiler: self, state: state, depth: depth)
+                parents.consume(state: state, depth: depth)
                 emit(instruction: .close)
                 emit(instruction: .close)
                 emit(instruction: .ifCondition("leftJoinCount == 0"))
-                parents.consume(compiler: self, state: state, depth: depth)
+                parents.consume(state: state, depth: depth)
                 emit(instruction: .close)
             }
         case let .filter(_, expr):
             emit(instruction: .ifCondition("eval(result, \(expr))"))
-            parents.consume(compiler: self, state: state, depth: depth)
+            parents.consume(state: state, depth: depth)
             emit(instruction: .close)
         case .union(_, _):
-            parents.consume(compiler: self, state: state, depth: depth)
+            parents.consume(state: state, depth: depth)
         case .namedGraph(_, .bound(_)):
-            parents.consume(compiler: self, state: state, depth: depth)
+            parents.consume(state: state, depth: depth)
         case let .namedGraph(child, .variable(graphVariable)):
             fatalError("TODO: implement consume(.namedGraph)")
         case let .extend(_, expr, name):
             emit(instruction: .constant("result", "result.extend(?\(name), \(expr))"))
-            parents.consume(compiler: self, state: state.addingPotentiallyBound(name), depth: depth)
+            parents.consume(state: state.addingPotentiallyBound(name), depth: depth)
         case let .minus(lhs, rhs):
             let ht = uniqueVariable("hashTable", parents: parents)
             let pb = lhs.necessarilyBound.union(rhs.necessarilyBound)
@@ -343,42 +365,42 @@ public class QueryCompiler {
                 let m = uniqueVariable("matching", parents: parents)
                 emit(instruction: .constant(m, "compatible(result, \(ht)[µ(result, \(nb))])"))
                 emit(instruction: .ifCondition("matching.count == 0"))
-                parents.consume(compiler: self, state: state, depth: depth)
+                parents.consume(state: state, depth: depth)
                 emit(instruction: .close)
                 let candidate = uniqueVariable("candidate", parents: parents)
                 emit(instruction: .forVariableIn(candidate, "matching"))
                 emit(instruction: .ifCondition("dom(result).disjointWith(dom(\(candidate)))"))
-                parents.consume(compiler: self, state: state, depth: depth)
+                parents.consume(state: state, depth: depth)
                 emit(instruction: .close)
                 emit(instruction: .close)
             }
         case let .project(_, vars):
             emit(instruction: .constant("result", "result.project(\(vars))"))
-            parents.consume(compiler: self, state: state.projecting(vars), depth: depth)
+            parents.consume(state: state.projecting(vars), depth: depth)
         case .distinct(_):
             let set = uniqueVariable("set", parents: parents)
             var s = state
             s.distinct = true
             emit(instruction: .ifCondition("!set.contains(result)"))
             emit(instruction: .setInsert(set, "insert(result)"))
-            parents.consume(compiler: self, state: state, depth: depth)
+            parents.consume(state: state, depth: depth)
             emit(instruction: .close)
         case let .slice(_, .some(offset), .some(limit)):
             let rowCount = uniqueVariable("rowCount", parents: parents)
             emit(instruction: .increment(rowCount))
             emit(instruction: .literal("if \(rowCount) <= \(offset) { continue }"))
             emit(instruction: .literal("if \(rowCount) > \(limit+offset) { break }")) // TODO: does this break out far enough?
-            parents.consume(compiler: self, state: state, depth: depth)
+            parents.consume(state: state, depth: depth)
         case let .slice(_, 0, .some(limit)), let .slice(_, nil, .some(limit)):
             let rowCount = uniqueVariable("rowCount", parents: parents)
             emit(instruction: .increment(rowCount))
             emit(instruction: .literal("if \(rowCount) > \(limit) { break }")) // TODO: does this break out far enough?
-            parents.consume(compiler: self, state: state, depth: depth)
+            parents.consume(state: state, depth: depth)
         case let .slice(_, .some(offset), 0), let .slice(_, .some(offset), nil):
             let rowCount = uniqueVariable("rowCount", parents: parents)
             emit(instruction: .increment(rowCount))
             emit(instruction: .literal("if \(rowCount) <= \(offset) { continue }"))
-            parents.consume(compiler: self, state: state, depth: depth)
+            parents.consume(state: state, depth: depth)
         case .order(_, _):
             let results = uniqueVariable("results", parents: parents)
             emit(instruction: .listAppend(results, "result"))

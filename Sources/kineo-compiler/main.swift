@@ -22,7 +22,7 @@ func data(fromFileOrString qfile: String) throws -> Data {
 
 
 
-var verbose = true
+var verbose = false
 let argscount = CommandLine.arguments.count
 var args = PeekableIterator(generator: CommandLine.arguments.makeIterator())
 guard let pname = args.next() else { fatalError("Missing command name") }
@@ -32,13 +32,25 @@ guard argscount >= 1 else {
     exit(1)
 }
 
-if let next = args.peek(), next == "-v" {
-    _ = args.next()
-    verbose = true
+var graph = Term(iri: "http://example.org/")
+while true {
+    if let next = args.peek() {
+        if next.hasPrefix("-") {
+            _ = args.next()
+            if next == "-v" {
+                verbose = true
+                continue
+            } else if next == "-g" {
+                guard let iri = args.next() else { fatalError("No IRI value given after -g") }
+                graph = Term(iri: iri)
+                continue
+            }
+        }
+    }
+    break
 }
 
 guard let qfile = args.next() else { fatalError("No query file given") }
-let graph = Term(iri: "http://example.org/")
 
 
 let startTime = getCurrentTime()
@@ -49,11 +61,8 @@ do {
     guard var p = SPARQLParser(data: sparql) else { fatalError("Failed to construct SPARQL parser") }
     let q = try p.parseQuery()
     let a = q.algebra
-    print(a.serialize())
     let c = QueryCompiler()
-    let parents = QueryCompiler.Ancestors(ancestors: [])
-    let graph = Term(iri: "http://example.org/")
-    try c.produce(algebra: a, parents: parents, activeGraph: .bound(graph))
+    try c.compile(algebra: a, activeGraph: .bound(graph))
 } catch let e {
     warn("*** Failed to evaluate query:")
     warn("*** - \(e)")
