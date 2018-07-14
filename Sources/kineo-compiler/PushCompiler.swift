@@ -314,9 +314,9 @@ public class QueryCompiler {
             let nb = lhs.necessarilyBound.intersection(rhs.necessarilyBound)
             let state = PartialResultState(distinct: false, necessarilyBound: nb, potentiallyBound: pb)
             if case .lhs = position {
-                emit(instruction: .listAppend("\(ht)[µ(result, \(nb))]", "result"))
+                emit(instruction: .listAppend("\(ht)[result.project(\(nb))]", "result"))
             } else {
-                emit(instruction: .forVariableIn("result", "compatible(result, \(ht)[µ(result, \(nb))])"))
+                emit(instruction: .forVariableIn("result", "compatible(result, \(ht)[result.project(\(nb))])"))
                 parents.consume(state: state, depth: depth)
                 emit(instruction: .close)
             }
@@ -326,11 +326,11 @@ public class QueryCompiler {
             let nb = lhs.necessarilyBound.intersection(rhs.necessarilyBound)
             let state = PartialResultState(distinct: false, necessarilyBound: nb, potentiallyBound: pb)
             if case .rhs = position {
-                emit(instruction: .listAppend("\(ht)[µ(result, \(nb))]", "result"))
+                emit(instruction: .listAppend("\(ht)[result.project(\(nb))]", "result"))
             } else {
                 emit(instruction: .variable("leftJoinCount", "0"))
                 let m = uniqueVariable("matching", parents: parents)
-                emit(instruction: .constant(m, "compatible(result, \(ht)[µ(result, \(nb))])"))
+                emit(instruction: .constant(m, "compatible(result, \(ht)[result.project(\(nb))])"))
                 emit(instruction: .forVariableIn("result", m))
                 emit(instruction: .ifCondition("eval(result, \(expr))"))
                 emit(instruction: .increment("leftJoinCount"))
@@ -360,10 +360,10 @@ public class QueryCompiler {
             let nb = lhs.necessarilyBound.intersection(rhs.necessarilyBound)
             let state = PartialResultState(distinct: false, necessarilyBound: nb, potentiallyBound: pb)
             if case .rhs = position {
-                emit(instruction: .listAppend("\(ht)[µ(result, \(nb))]", "result"))
+                emit(instruction: .listAppend("\(ht)[result.project(\(nb))]", "result"))
             } else {
                 let m = uniqueVariable("matching", parents: parents)
-                emit(instruction: .constant(m, "compatible(result, \(ht)[µ(result, \(nb))])"))
+                emit(instruction: .constant(m, "compatible(result, \(ht)[result.project(\(nb))])"))
                 emit(instruction: .ifCondition("matching.count == 0"))
                 parents.consume(state: state, depth: depth)
                 emit(instruction: .close)
@@ -375,7 +375,7 @@ public class QueryCompiler {
                 emit(instruction: .close)
             }
         case let .project(_, vars):
-            emit(instruction: .constant("result", "result.project(\(vars))"))
+            emit(instruction: .assign("result", "result.project(\(vars))"))
             parents.consume(state: state.projecting(vars), depth: depth)
         case .distinct(_):
             let set = uniqueVariable("set", parents: parents)
@@ -407,7 +407,7 @@ public class QueryCompiler {
         case let .aggregate(_, groups, _):
             let g = uniqueVariable("group", parents: parents)
             let gs = uniqueVariable("groups", parents: parents)
-            emit(instruction: .constant(g, "µ(result, \(groups))"))
+            emit(instruction: .constant(g, "result.project(\(groups))"))
             emit(instruction: .listAppend("\(gs)[\(g)]", "result"))
         case let .window(child, groups, windows):
             fatalError("TODO: implement consume(.window(\(child), \(groups), \(windows)))")
