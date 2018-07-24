@@ -62,7 +62,7 @@ do {
     let q = try p.parseQuery()
     let a = q.algebra
     let c = QueryCompiler()
-    try c.compile(algebra: a, activeGraph: .bound(graph))
+    try c.compile(algebra: a, activeGraph: graph)
 } catch let e {
     warn("*** Failed to evaluate query:")
     warn("*** - \(e)")
