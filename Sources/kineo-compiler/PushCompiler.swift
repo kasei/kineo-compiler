@@ -127,7 +127,11 @@ public class QueryCompiler {
     }
     
     indirect enum Plan: Hashable {
-        case unionIdentity(analysis: PartialResultState)
+        case ask(Plan, analysis: PartialResultState)
+        case construct(Plan, [TriplePattern], analysis: PartialResultState)
+        case describe(Plan, Node, analysis: PartialResultState)
+
+        case empty(analysis: PartialResultState)
         case joinIdentity(analysis: PartialResultState)
         case table([TermResult], analysis: PartialResultState)
         case quad(QuadPattern, analysis: PartialResultState)
@@ -215,7 +219,7 @@ public class QueryCompiler {
         switch algebra {
         case .unionIdentity:
             let state = PartialResultState(distinct: true, necessarilyBound: [], potentiallyBound: [])
-            return (.unionIdentity(analysis: state), state)
+            return (.empty(analysis: state), state)
         case .joinIdentity:
             let state = PartialResultState(distinct: true, necessarilyBound: [], potentiallyBound: [])
             return (.joinIdentity(analysis: state), state)
@@ -299,16 +303,29 @@ public class QueryCompiler {
             fatalError("TODO: implement queryPlan(for: .subquery(\(q)))")
         }
     }
-    
-    public func compile(algebra: Algebra, activeGraph: Term) throws {
+
+    public func compile(query: Query, activeGraph: Term) throws {
+        let algebra = query.algebra
         let parents = QueryCompiler.Ancestors(ancestors: [], compiler: self)
-        let (plan, _) = try queryPlan(for: algebra, activeGraph: activeGraph)
+        var (plan, state) = try queryPlan(for: algebra, activeGraph: activeGraph)
+        
+        switch query.form {
+        case .select(_):
+            break
+        case .ask:
+            plan = .ask(plan, analysis: state.projecting([]))
+        case .construct(_):
+            fatalError()
+        case .describe(_):
+            fatalError()
+        }
+        
         return try produce(plan: plan, parents: parents, activeGraph: activeGraph)
     }
     
     func produce(plan: Plan, parents: Ancestors, activeGraph: Term) throws {
         switch plan {
-        case .unionIdentity:
+        case .empty:
             break
         case .joinIdentity:
             let state = PartialResultState(distinct: true, necessarilyBound: [], potentiallyBound: [])
@@ -398,12 +415,22 @@ public class QueryCompiler {
             fatalError("TODO: implement produce(.window(\(child), \(groups), \(windows)))")
         case let .subquery(q):
             fatalError("TODO: implement produce(.subquery(\(q)))")
+            
+        case let .ask(child, state):
+            let rowCount = uniqueVariable("rowCount", parents: parents)
+            emit(instruction: .variable(rowCount, "0"))
+            try produce(plan: child, parents: parents.adding(plan), activeGraph: activeGraph)
+            emit(instruction: .assign("result", "(\(rowCount) > 0) ? true : false"))
+            parents.consume(state: state, depth: depth)
+        case let .describe(child, _, _), let .construct(child, _, _):
+            try produce(plan: child, parents: parents.adding(plan), activeGraph: activeGraph)
+            fatalError()
         }
     }
     
     func consume(plan: Plan, parents: Ancestors, inPosition position: Ancestors.ChildIdentifier = .lhs) {
         switch plan {
-        case .unionIdentity, .joinIdentity, .quad(_), .bgp(_), .service(_), .path(_):
+        case .empty, .joinIdentity, .quad(_), .bgp(_), .service(_), .path(_):
             fatalError("Plan cannot consume results: \(plan)")
         case let .innerHashJoin(_, _, _, state):
             let nb = state.necessarilyBound
@@ -500,6 +527,15 @@ public class QueryCompiler {
             fatalError("TODO: implement consume(.window(\(child), \(groups), \(windows)))")
         case let .subquery(q, _):
             fatalError("TODO: implement consume(.subquery(\(q)))")
+
+        case .ask(_, _):
+            let rowCount = uniqueVariable("rowCount", parents: parents)
+            emit(instruction: .increment(rowCount))
+            emit(instruction: .literal("break"))
+        case let .describe(child, _, _):
+            fatalError()
+        case let .construct(child, _, _):
+            fatalError()
         }
     }
 }

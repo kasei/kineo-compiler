@@ -60,9 +60,8 @@ do {
     let sparql = try data(fromFileOrString: qfile)
     guard var p = SPARQLParser(data: sparql) else { fatalError("Failed to construct SPARQL parser") }
     let q = try p.parseQuery()
-    let a = q.algebra
     let c = QueryCompiler()
-    try c.compile(algebra: a, activeGraph: graph)
+    try c.compile(query: q, activeGraph: graph)
 } catch let e {
     warn("*** Failed to evaluate query:")
     warn("*** - \(e)")
