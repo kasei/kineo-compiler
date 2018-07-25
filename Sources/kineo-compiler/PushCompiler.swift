@@ -135,8 +135,8 @@ public class QueryCompiler {
         case joinIdentity(analysis: PartialResultState)
         case table([TermResult], analysis: PartialResultState)
         case quad(QuadPattern, analysis: PartialResultState)
-        case bgp(Term, [TriplePattern], analysis: PartialResultState)
-        case path(Term, Node, PropertyPath, Node, analysis: PartialResultState)
+        case bgp(Node, [TriplePattern], analysis: PartialResultState)
+        case path(Node, Node, PropertyPath, Node, analysis: PartialResultState)
         case innerHashJoin(Plan, Plan, Set<String>, analysis: PartialResultState)
         case leftOuterHashJoin(Plan, Plan, Expression, Set<String>, analysis: PartialResultState)
         case filter(Plan, Expression, analysis: PartialResultState)
@@ -215,7 +215,7 @@ public class QueryCompiler {
         }
     }
 
-    func queryPlan(for algebra: Algebra, activeGraph: Term) throws -> (Plan, PartialResultState) {
+    func queryPlan(for algebra: Algebra, activeGraph: Node) throws -> (Plan, PartialResultState) {
         switch algebra {
         case .unionIdentity:
             let state = PartialResultState(distinct: true, necessarilyBound: [], potentiallyBound: [])
@@ -232,7 +232,7 @@ public class QueryCompiler {
             return (.quad(qp, analysis: state), state)
         case let .triple(tp):
             let state = PartialResultState(distinct: false, necessarilyBound:algebra.necessarilyBound, potentiallyBound: algebra.inscope)
-            let qp = QuadPattern(triplePattern: tp, graph: .bound(activeGraph))
+            let qp = QuadPattern(triplePattern: tp, graph: activeGraph)
             return (.quad(qp, analysis: state), state)
         case let .bgp(tps):
             let state = PartialResultState(distinct: false, necessarilyBound: algebra.necessarilyBound, potentiallyBound: algebra.inscope)
@@ -268,9 +268,13 @@ public class QueryCompiler {
             let (r, _) = try queryPlan(for: rhs, activeGraph: activeGraph)
             return (.union(l, r, analysis: state), state)
         case let .namedGraph(child, .bound(term)):
-            return try queryPlan(for: child, activeGraph: term)
-        case let .namedGraph(child, .variable(graphVariable)):
-            fatalError("TODO: implement queryPlan(for: .namedGraph(\(child), \(graphVariable)))")
+            return try queryPlan(for: child, activeGraph: .bound(term))
+        case let .namedGraph(child, .variable(graphVariable, binding: binding)):
+            let pb = child.inscope.union([graphVariable])
+            let nb = child.necessarilyBound.union([graphVariable])
+            let (c, s) = try queryPlan(for: child, activeGraph: .variable(graphVariable, binding: binding))
+            let state = PartialResultState(distinct: s.distinct, necessarilyBound: nb, potentiallyBound: pb)
+            return (.namedGraph(c, graphVariable, analysis: state), state)
         case let .extend(child, expr, name):
             let (c, state) = try queryPlan(for: child, activeGraph: activeGraph)
             return (.extend(c, expr, name, analysis: state), state)
@@ -307,7 +311,7 @@ public class QueryCompiler {
     public func compile(query: Query, activeGraph: Term) throws {
         let algebra = query.algebra
         let parents = QueryCompiler.Ancestors(ancestors: [], compiler: self)
-        var (plan, state) = try queryPlan(for: algebra, activeGraph: activeGraph)
+        var (plan, state) = try queryPlan(for: algebra, activeGraph: .bound(activeGraph))
         
         switch query.form {
         case .select(_):
@@ -320,10 +324,10 @@ public class QueryCompiler {
             fatalError()
         }
         
-        return try produce(plan: plan, parents: parents, activeGraph: activeGraph)
+        return try produce(plan: plan, parents: parents, activeGraph: .bound(activeGraph))
     }
     
-    func produce(plan: Plan, parents: Ancestors, activeGraph: Term) throws {
+    func produce(plan: Plan, parents: Ancestors, activeGraph: Node) throws {
         switch plan {
         case .empty:
             break
@@ -341,8 +345,12 @@ public class QueryCompiler {
             parents.consume(state: state, depth: depth)
             emit(instruction: .close)
         case let .bgp(graph, tps, state):
-            let qps = tps.map { QuadPattern(triplePattern: $0, graph: .bound(graph)) }
-            emit(instruction: .forVariableIn("result", "match_bgp(\(qps))"))
+            switch graph {
+            case .bound(let t):
+                emit(instruction: .forVariableIn("result", "match(bgp: \(tps), in: \(t))"))
+            case .variable(let name, binding: _):
+                emit(instruction: .forVariableIn("result", "match(bgp: \(tps), in: \(name))"))
+            }
             parents.consume(state: state, depth: depth)
             emit(instruction: .close)
         case let .path(_, subject, pp, object, state):
@@ -370,7 +378,9 @@ public class QueryCompiler {
             try produce(plan: lhs, parents: parents.adding(plan, inPosition: .lhs), activeGraph: activeGraph)
             try produce(plan: rhs, parents: parents.adding(plan, inPosition: .rhs), activeGraph: activeGraph)
         case let .namedGraph(child, graphVariable, _):
-            fatalError("TODO: implement produce(.namedGraph(\(child), \(graphVariable)))")
+            emit(instruction: .forVariableIn(graphVariable, "graphs()"))
+            try produce(plan: child, parents: parents.adding(plan, inPosition: .lhs), activeGraph: .variable(graphVariable, binding: true))
+            emit(instruction: .close)
         case let .extend(child, _, _, _):
             try produce(plan: child, parents: parents.adding(plan), activeGraph: activeGraph)
         case let .minus(lhs, rhs, _):
@@ -467,8 +477,8 @@ public class QueryCompiler {
             emit(instruction: .close)
         case let .union(_, _, state):
             parents.consume(state: state, depth: depth)
-        case .namedGraph(_, _, _):
-            fatalError("TODO: implement consume(.namedGraph)")
+        case let .namedGraph(_, _, state):
+            parents.consume(state: state, depth: depth)
         case let .extend(_, expr, name, state):
             emit(instruction: .constant("result", "result.extend(?\(name), \(expr))"))
             parents.consume(state: state.addingPotentiallyBound(name), depth: depth)
@@ -532,9 +542,9 @@ public class QueryCompiler {
             let rowCount = uniqueVariable("rowCount", parents: parents)
             emit(instruction: .increment(rowCount))
             emit(instruction: .literal("break"))
-        case let .describe(child, _, _):
+        case .describe(_, _, _):
             fatalError()
-        case let .construct(child, _, _):
+        case .construct(_, _, _):
             fatalError()
         }
     }
