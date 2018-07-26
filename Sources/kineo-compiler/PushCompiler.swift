@@ -151,7 +151,7 @@ public class QueryCompiler {
         case order(Plan, [Algebra.SortComparator], analysis: PartialResultState)
         case aggregate(Plan, [Expression], Set<Algebra.AggregationMapping>, analysis: PartialResultState)
         case window(Plan, [Expression], [Algebra.WindowFunctionMapping], analysis: PartialResultState)
-        case subquery(Query, analysis: PartialResultState)
+        case subquery(Plan, analysis: PartialResultState)
     }
 
     enum CompilerInstruction {
@@ -215,6 +215,13 @@ public class QueryCompiler {
         }
     }
 
+    func queryPlan(for query: Query, activeGraph: Node) throws -> (Plan, PartialResultState) {
+        let algebra = query.algebra
+        var (plan, state) = try queryPlan(for: algebra, activeGraph: activeGraph)
+        plan = wrap(plan: plan, for: query, state: state)
+        return (plan, state)
+    }
+    
     func queryPlan(for algebra: Algebra, activeGraph: Node) throws -> (Plan, PartialResultState) {
         switch algebra {
         case .unionIdentity:
@@ -304,26 +311,26 @@ public class QueryCompiler {
         case let .window(child, groups, windows):
             fatalError("TODO: implement queryPlan(for: .window(\(child), \(groups), \(windows)))")
         case let .subquery(q):
-            fatalError("TODO: implement queryPlan(for: .subquery(\(q)))")
+            return try queryPlan(for: q, activeGraph: activeGraph)
         }
     }
 
-    public func compile(query: Query, activeGraph: Term) throws {
-        let algebra = query.algebra
-        let parents = QueryCompiler.Ancestors(ancestors: [], compiler: self)
-        var (plan, state) = try queryPlan(for: algebra, activeGraph: .bound(activeGraph))
-        
+    func wrap(plan: Plan, for query: Query, state: PartialResultState) -> Plan {
         switch query.form {
         case .select(_):
-            break
+            return plan
         case .ask:
-            plan = .ask(plan, analysis: state.projecting([]))
+            return .ask(plan, analysis: state.projecting([]))
         case .construct(_):
             fatalError()
         case .describe(_):
             fatalError()
         }
-        
+    }
+    
+    public func compile(query: Query, activeGraph: Term) throws {
+        let (plan, _) = try queryPlan(for: query, activeGraph: .bound(activeGraph))
+        let parents = QueryCompiler.Ancestors(ancestors: [], compiler: self)
         return try produce(plan: plan, parents: parents, activeGraph: .bound(activeGraph))
     }
     
@@ -423,8 +430,8 @@ public class QueryCompiler {
         case let .window(child, groups, windows, _):
             try produce(plan: child, parents: parents.adding(plan), activeGraph: activeGraph)
             fatalError("TODO: implement produce(.window(\(child), \(groups), \(windows)))")
-        case let .subquery(q):
-            fatalError("TODO: implement produce(.subquery(\(q)))")
+        case let .subquery(child, _):
+            try produce(plan: child, parents: parents.adding(plan), activeGraph: activeGraph)
             
         case let .ask(child, state):
             let rowCount = uniqueVariable("rowCount", parents: parents)
@@ -535,8 +542,8 @@ public class QueryCompiler {
             emit(instruction: .listAppend("\(gs)[\(g)]", "result"))
         case let .window(child, groups, windows, _):
             fatalError("TODO: implement consume(.window(\(child), \(groups), \(windows)))")
-        case let .subquery(q, _):
-            fatalError("TODO: implement consume(.subquery(\(q)))")
+        case let .subquery(_, state):
+            parents.consume(state: state, depth: depth)
 
         case .ask(_, _):
             let rowCount = uniqueVariable("rowCount", parents: parents)
