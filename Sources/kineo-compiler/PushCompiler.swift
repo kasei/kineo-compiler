@@ -129,7 +129,7 @@ public class QueryCompiler {
     indirect enum Plan: Hashable {
         case ask(Plan, analysis: PartialResultState)
         case construct(Plan, [TriplePattern], analysis: PartialResultState)
-        case describe(Plan, Node, analysis: PartialResultState)
+        case describe(Plan, [Node], analysis: PartialResultState)
         case exists(Plan, Plan, String, analysis: PartialResultState)
         
         case empty(analysis: PartialResultState)
@@ -158,6 +158,7 @@ public class QueryCompiler {
     enum CompilerInstruction {
         case forVariableIn(String, String)
         case ifCondition(String)
+        case elseCondition
         case open(String)
         case close
         case setInsert(String, String)
@@ -185,6 +186,9 @@ public class QueryCompiler {
         case .ifCondition(let s):
             print("\(indent)if \(s) {")
             depth += 1
+        case .elseCondition:
+            let indent = String(repeating: " ", count: 4*(depth-1))
+            print("\(indent)} else {")
         case .open(let s):
             print("\(indent)\(s) {")
             depth += 1
@@ -207,12 +211,12 @@ public class QueryCompiler {
     
     func uniqueVariable(_ name: String, parents: Ancestors) -> String {
         if let id = uniqueVariables[parents] {
-            return "\(name)\(id)"
+            return "\(name)_\(id)"
         } else {
             nextVariable += 1
             let id = nextVariable
             uniqueVariables[parents] = id
-            return "\(name)\(id)"
+            return "\(name)_\(id)"
         }
     }
 
@@ -349,121 +353,174 @@ public class QueryCompiler {
         return try produce(plan: plan, parents: parents)
     }
     
-    func produce(plan: Plan, parents: Ancestors) throws {
+    func emitExpressionRewritting(variable eVar: String, expr: String, result replacementResultVariable: String?) {
+        if let replacement = replacementResultVariable {
+            emit(instruction: .variable(eVar, expr))
+            emit(instruction: .assign(eVar, "\(eVar).replaceVariables(with: \(replacement))"))
+        } else {
+            emit(instruction: .constant(eVar, expr))
+        }
+    }
+    
+    func produce(plan: Plan, parents: Ancestors, replacementResultVariable: String? = nil) throws {
+        let result = uniqueVariable("result", parents: parents)
         switch plan {
         case .empty:
             break
         case .joinIdentity:
             let state = PartialResultState(distinct: true, necessarilyBound: [], potentiallyBound: [])
-            emit(instruction: .constant("result", "TermResult()"))
-            try parents.consume(state: state, resultName: "result", depth: depth)
+            emit(instruction: .constant(result, "TermResult()"))
+            try parents.consume(state: state, resultName: result, depth: depth)
         case let .table(results, state):
             for r in results {
-                emit(instruction: .constant("result", "\(r)"))
-                try parents.consume(state: state, resultName: "result", depth: depth)
+                emit(instruction: .constant(result, "\(r)"))
+                try parents.consume(state: state, resultName: result, depth: depth)
             }
         case let .quad(qp, state):
-            let qpVar = uniqueVariable("qp", parents: parents)
+            var qpVar = uniqueVariable("qp", parents: parents)
             emit(instruction: .constant(qpVar, "quad_pattern(\(qp))"))
-            emit(instruction: .forVariableIn("result", "match_quad(\(qpVar))"))
-            try parents.consume(state: state, resultName: "result", depth: depth)
+            if let replacement = replacementResultVariable {
+                let qpVar2 = uniqueVariable("qp_replaced", parents: parents)
+                emit(instruction: .constant(qpVar2, "\(qpVar).replaceVariables(with: \(replacement))"))
+                qpVar = qpVar2
+            }
+            emit(instruction: .forVariableIn(result, "match_quad(\(qpVar))"))
+            try parents.consume(state: state, resultName: result, depth: depth)
             emit(instruction: .close)
         case let .bgp(graph, tps, state):
-            let bgpVar = uniqueVariable("bgp", parents: parents)
+            var bgpVar = uniqueVariable("bgp", parents: parents)
             emit(instruction: .constant(bgpVar, "bgp_pattern(\(tps))"))
+            if let replacement = replacementResultVariable {
+                let bgpVar2 = uniqueVariable("bgp_replaced", parents: parents)
+                emit(instruction: .constant(bgpVar2, "\(bgpVar).replaceVariables(with: \(replacement))"))
+                bgpVar = bgpVar2
+            }
             switch graph {
             case .bound(let t):
-                emit(instruction: .forVariableIn("result", "match(bgp: \(bgpVar), in: \(t))"))
+                emit(instruction: .forVariableIn(result, "match(bgp: \(bgpVar), in: \(t))"))
             case .variable(let name, binding: _):
-                emit(instruction: .forVariableIn("result", "match(bgp: \(bgpVar), in: \(name))"))
+                emit(instruction: .forVariableIn(result, "match(bgp: \(bgpVar), in: \(name))"))
             }
-            try parents.consume(state: state, resultName: "result", depth: depth)
+            try parents.consume(state: state, resultName: result, depth: depth)
             emit(instruction: .close)
         case let .path(_, subject, pp, object, state):
-            let pathVar = uniqueVariable("path", parents: parents)
+            var pathVar = uniqueVariable("path", parents: parents)
             emit(instruction: .constant(pathVar, "path_pattern(\(subject), \(pp), \(object))"))
-            emit(instruction: .forVariableIn("result", "match_path(\(pathVar))"))
-            try parents.consume(state: state, resultName: "result", depth: depth)
+            if let replacement = replacementResultVariable {
+                let pathVar2 = uniqueVariable("path_replaced", parents: parents)
+                emit(instruction: .constant(pathVar2, "\(pathVar).replaceVariables(with: \(replacement))"))
+                pathVar = pathVar2
+            }
+            emit(instruction: .forVariableIn(result, "match_path(\(pathVar))"))
+            try parents.consume(state: state, resultName: result, depth: depth)
             emit(instruction: .close)
         case let .service(endpoint, child, silent, state):
-            emit(instruction: .forVariableIn("result", "service(\(endpoint), \(child), \(silent))"))
-            try parents.consume(state: state, resultName: "result", depth: depth)
+            emit(instruction: .forVariableIn(result, "service(\(endpoint), \(child), \(silent))"))
+            try parents.consume(state: state, resultName: result, depth: depth)
             emit(instruction: .close)
             
         case let .exists(child, _, _, _):
-            try produce(plan: child, parents: parents.adding(plan, inPosition: .lhs))
+            try produce(plan: child, parents: parents.adding(plan, inPosition: .lhs), replacementResultVariable: replacementResultVariable)
         case let .innerHashJoin(lhs, rhs, _, _):
             let ht = uniqueVariable("hashTable", parents: parents)
             emit(instruction: .variable(ht, "[:]"))
-            try produce(plan: lhs, parents: parents.adding(plan, inPosition: .lhs))
-            try produce(plan: rhs, parents: parents.adding(plan, inPosition: .rhs))
-        case let .leftOuterHashJoin(lhs, rhs, _, _, _):
+            try produce(plan: lhs, parents: parents.adding(plan, inPosition: .lhs), replacementResultVariable: replacementResultVariable)
+            try produce(plan: rhs, parents: parents.adding(plan, inPosition: .rhs), replacementResultVariable: replacementResultVariable)
+        case let .leftOuterHashJoin(lhs, rhs, expr, _, _):
+            let exprVar = uniqueVariable("expr", parents: parents)
+            emitExpressionRewritting(variable: exprVar, expr: "Expression(\(expr))", result: replacementResultVariable)
             let ht = uniqueVariable("hashTable", parents: parents)
             emit(instruction: .variable(ht, "[:]"))
-            try produce(plan: rhs, parents: parents.adding(plan, inPosition: .rhs))
-            try produce(plan: lhs, parents: parents.adding(plan, inPosition: .lhs))
-        case let .filter(child, _, _):
-            try produce(plan: child, parents: parents.adding(plan))
+            try produce(plan: rhs, parents: parents.adding(plan, inPosition: .rhs), replacementResultVariable: replacementResultVariable)
+            try produce(plan: lhs, parents: parents.adding(plan, inPosition: .lhs), replacementResultVariable: replacementResultVariable)
+        case let .filter(child, expr, _):
+            let exprVar = uniqueVariable("expr", parents: parents)
+            emitExpressionRewritting(variable: exprVar, expr: "Expression(\(expr))", result: replacementResultVariable)
+            try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
         case let .union(lhs, rhs, _):
-            try produce(plan: lhs, parents: parents.adding(plan, inPosition: .lhs))
-            try produce(plan: rhs, parents: parents.adding(plan, inPosition: .rhs))
+            try produce(plan: lhs, parents: parents.adding(plan, inPosition: .lhs), replacementResultVariable: replacementResultVariable)
+            try produce(plan: rhs, parents: parents.adding(plan, inPosition: .rhs), replacementResultVariable: replacementResultVariable)
         case let .namedGraph(child, graphVariable, _):
-            emit(instruction: .forVariableIn(graphVariable, "graphs()"))
-            try produce(plan: child, parents: parents.adding(plan, inPosition: .lhs))
-            emit(instruction: .close)
-        case let .extend(child, _, _, _):
-            try produce(plan: child, parents: parents.adding(plan))
+            if let replacement = replacementResultVariable {
+                emit(instruction: .ifCondition("let \(graphVariable) = \(replacement)[\"\(graphVariable)\"]"))
+                try produce(plan: child, parents: parents.adding(plan, inPosition: .lhs), replacementResultVariable: replacementResultVariable)
+                emit(instruction: .elseCondition)
+                emit(instruction: .forVariableIn(graphVariable, "graphs()"))
+                try produce(plan: child, parents: parents.adding(plan, inPosition: .lhs), replacementResultVariable: replacementResultVariable)
+                emit(instruction: .close)
+                emit(instruction: .close)
+            } else {
+                emit(instruction: .forVariableIn(graphVariable, "graphs()"))
+                try produce(plan: child, parents: parents.adding(plan, inPosition: .lhs), replacementResultVariable: replacementResultVariable)
+                emit(instruction: .close)
+            }
+        case let .extend(child, expr, _, _):
+            let exprVar = uniqueVariable("expr", parents: parents)
+            emitExpressionRewritting(variable: exprVar, expr: "Expression(\(expr))", result: replacementResultVariable)
+            try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
         case let .minus(lhs, rhs, _):
             let ht = uniqueVariable("hashTable", parents: parents)
             emit(instruction: .variable(ht, "[:]"))
-            try produce(plan: rhs, parents: parents.adding(plan, inPosition: .rhs))
-            try produce(plan: lhs, parents: parents.adding(plan, inPosition: .lhs))
+            try produce(plan: rhs, parents: parents.adding(plan, inPosition: .rhs), replacementResultVariable: replacementResultVariable)
+            try produce(plan: lhs, parents: parents.adding(plan, inPosition: .lhs), replacementResultVariable: replacementResultVariable)
         case let .project(child, _, _):
-            try produce(plan: child, parents: parents.adding(plan))
+            try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
         case let .setDistinct(child, _):
             let set = uniqueVariable("set", parents: parents)
             emit(instruction: .variable(set, "Set()"))
-            try produce(plan: child, parents: parents.adding(plan))
+            try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
         case let .slice(child, _, _, _):
             let rowCount = uniqueVariable("rowCount", parents: parents)
             emit(instruction: .variable(rowCount, "0"))
-            try produce(plan: child, parents: parents.adding(plan))
+            try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
         case let .order(child, cmps, state):
+            let cmpsVar = uniqueVariable("comparators", parents: parents)
+            emitExpressionRewritting(variable: cmpsVar, expr: "Comparators(\(cmps))", result: replacementResultVariable)
             let results = uniqueVariable("results", parents: parents)
             emit(instruction: .variable(results, "[]"))
-            try produce(plan: child, parents: parents.adding(plan))
-            emit(instruction: .assign(results, "sort(\(results), with: \(cmps))"))
-            emit(instruction: .forVariableIn("result", results))
-            try parents.consume(state: state, resultName: "result", depth: depth)
+            try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
+            emit(instruction: .assign(results, "sort(\(results), with: \(cmpsVar))"))
+            emit(instruction: .forVariableIn(result, results))
+            try parents.consume(state: state, resultName: result, depth: depth)
             emit(instruction: .close)
-        case let .aggregate(child, _, aggs, state):
+        case let .aggregate(child, groups, aggs, state):
+            let groupsVar = uniqueVariable("groups", parents: parents)
+            emitExpressionRewritting(variable: groupsVar, expr: "Groups(\(groups))", result: replacementResultVariable)
             let results = uniqueVariable("results", parents: parents)
             emit(instruction: .variable(results, "[]"))
-            let gs = uniqueVariable("groups", parents: parents)
+            let gs = uniqueVariable("groupsData", parents: parents)
             emit(instruction: .variable(gs, "[:]"))
-            try produce(plan: child, parents: parents.adding(plan))
+            try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
             let g = uniqueVariable("group", parents: parents)
             emit(instruction: .forVariableIn(g, gs))
-            emit(instruction: .variable("result", "\(g).copy()"))
-            for a in aggs {
-                emit(instruction: .assign("result[\"\(a.variableName)\"]", "aggregate(groups[\(g)], \(a.aggregation))"))
+            emit(instruction: .variable(result, "\(g).copy()"))
+            for (i, a) in aggs.enumerated() {
+                let aggVar = uniqueVariable("agg\(i)", parents: parents)
+                emitExpressionRewritting(variable: aggVar, expr: "Aggregation(\(a.aggregation))", result: replacementResultVariable)
+                emit(instruction: .assign("\(result)[\"\(a.variableName)\"]", "aggregate(groups[\(g)], \(aggVar))"))
             }
-            try parents.consume(state: state, resultName: "result", depth: depth)
+            try parents.consume(state: state, resultName: result, depth: depth)
             emit(instruction: .close)
         case let .window(child, groups, windows, _):
-            try produce(plan: child, parents: parents.adding(plan))
+            try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
             fatalError("TODO: implement produce(.window(\(child), \(groups), \(windows)))")
         case let .subquery(child, _):
-            try produce(plan: child, parents: parents.adding(plan))
+            try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
             
         case let .ask(child, state):
             let rowCount = uniqueVariable("rowCount", parents: parents)
             emit(instruction: .variable(rowCount, "0"))
-            try produce(plan: child, parents: parents.adding(plan))
-            emit(instruction: .assign("result", "(\(rowCount) > 0) ? true : false"))
-            try parents.consume(state: state, resultName: "result", depth: depth)
-        case let .describe(child, _, _), let .construct(child, _, _):
-            try produce(plan: child, parents: parents.adding(plan))
+            try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
+            emit(instruction: .assign(result, "(\(rowCount) > 0) ? true : false"))
+            try parents.consume(state: state, resultName: result, depth: depth)
+        case let .describe(child, nodes, _):
+            let describeNodes = uniqueVariable("describeNodes", parents: parents)
+            emitExpressionRewritting(variable: describeNodes, expr: "\(nodes)", result: replacementResultVariable)
+
+            try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
+            fatalError()
+        case let .construct(child, _, _):
+            try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
             fatalError()
         }
     }
@@ -482,9 +539,8 @@ public class QueryCompiler {
                 // main branch
                 let rowCount = uniqueVariable("rowCount", parents: parents)
                 emit(instruction: .variable(rowCount, "0"))
-                emit(instruction: .literal("// TODO: substitute variables from $\(resultName) into exists pattern:"))
-                try produce(plan: exists, parents: parents.adding(plan, inPosition: .rhs))
-                emit(instruction: .assign(name, "\(resultName).extend(?\(name), (\(rowCount) > 0) ? true : false)"))
+                try produce(plan: exists, parents: parents.adding(plan, inPosition: .rhs), replacementResultVariable: resultName)
+                emit(instruction: .assign(name, "(\(rowCount) > 0) ? true : false"))
                 try parents.consume(state: state, resultName: resultName, depth: depth)
             }
         case let .innerHashJoin(_, _, _, state):
@@ -497,7 +553,8 @@ public class QueryCompiler {
                 try parents.consume(state: state, resultName: resultName, depth: depth)
                 emit(instruction: .close)
             }
-        case let .leftOuterHashJoin(_, _, expr, _, state):
+        case let .leftOuterHashJoin(_, _, _, _, state):
+            let expr = uniqueVariable("expr", parents: parents)
             let ht = uniqueVariable("hashTable", parents: parents)
             let nb = state.necessarilyBound
             if case .rhs = position {
@@ -516,16 +573,18 @@ public class QueryCompiler {
                 try parents.consume(state: state, resultName: resultName, depth: depth)
                 emit(instruction: .close)
             }
-        case let .filter(_, expr, state):
-            emit(instruction: .ifCondition("eval(\(resultName), \(expr))"))
+        case let .filter(_, _, state):
+            let exprVar = uniqueVariable("expr", parents: parents)
+            emit(instruction: .ifCondition("eval(\(resultName), \(exprVar))"))
             try parents.consume(state: state, resultName: resultName, depth: depth)
             emit(instruction: .close)
         case let .union(_, _, state):
             try parents.consume(state: state, resultName: resultName, depth: depth)
         case let .namedGraph(_, _, state):
             try parents.consume(state: state, resultName: resultName, depth: depth)
-        case let .extend(_, expr, name, state):
-            emit(instruction: .constant(resultName, "\(resultName).extend(?\(name), \(expr))"))
+        case let .extend(_, _, name, state):
+            let exprVar = uniqueVariable("expr", parents: parents)
+            emit(instruction: .constant(resultName, "\(resultName).extend(?\(name), \(exprVar))"))
             try parents.consume(state: state.addingPotentiallyBound(name), resultName: resultName, depth: depth)
         case let .minus(_, _, state):
             let ht = uniqueVariable("hashTable", parents: parents)
@@ -573,10 +632,11 @@ public class QueryCompiler {
         case .order(_, _, _):
             let results = uniqueVariable("results", parents: parents)
             emit(instruction: .listAppend(results, resultName))
-        case let .aggregate(_, groups, _, _):
+        case .aggregate(_, _, _, _):
+            let groupsVar = uniqueVariable("groups", parents: parents)
             let g = uniqueVariable("group", parents: parents)
-            let gs = uniqueVariable("groups", parents: parents)
-            emit(instruction: .constant(g, "\(resultName).project(\(groups))"))
+            let gs = uniqueVariable("groupsData", parents: parents)
+            emit(instruction: .constant(g, "\(resultName).project(\(groupsVar))")) // TODO: grouping should be projecting on variables, not expressions
             emit(instruction: .listAppend("\(gs)[\(g)]", resultName))
         case let .window(child, groups, windows, _):
             fatalError("TODO: implement consume(.window(\(child), \(groups), \(windows)))")
