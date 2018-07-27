@@ -423,14 +423,14 @@ public class QueryCompiler {
             try produce(plan: child, parents: parents.adding(plan, inPosition: .lhs), replacementResultVariable: replacementResultVariable)
         case let .innerHashJoin(lhs, rhs, _, _):
             let ht = uniqueVariable("hashTable", parents: parents)
-            emit(instruction: .variable(ht, "[:]"))
+            emit(instruction: .variable(ht, "[TermResult:[TermResult]]()"))
             try produce(plan: lhs, parents: parents.adding(plan, inPosition: .lhs), replacementResultVariable: replacementResultVariable)
             try produce(plan: rhs, parents: parents.adding(plan, inPosition: .rhs), replacementResultVariable: replacementResultVariable)
         case let .leftOuterHashJoin(lhs, rhs, expr, _, _):
             let exprVar = uniqueVariable("expr", parents: parents)
             emitExpressionRewritting(variable: exprVar, expr: "Expression(\(expr))", result: replacementResultVariable)
             let ht = uniqueVariable("hashTable", parents: parents)
-            emit(instruction: .variable(ht, "[:]"))
+            emit(instruction: .variable(ht, "[TermResult:[TermResult]]()"))
             try produce(plan: rhs, parents: parents.adding(plan, inPosition: .rhs), replacementResultVariable: replacementResultVariable)
             try produce(plan: lhs, parents: parents.adding(plan, inPosition: .lhs), replacementResultVariable: replacementResultVariable)
         case let .filter(child, expr, _):
@@ -460,7 +460,7 @@ public class QueryCompiler {
             try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
         case let .minus(lhs, rhs, _):
             let ht = uniqueVariable("hashTable", parents: parents)
-            emit(instruction: .variable(ht, "[:]"))
+            emit(instruction: .variable(ht, "[TermResult:[TermResult]]()"))
             try produce(plan: rhs, parents: parents.adding(plan, inPosition: .rhs), replacementResultVariable: replacementResultVariable)
             try produce(plan: lhs, parents: parents.adding(plan, inPosition: .lhs), replacementResultVariable: replacementResultVariable)
         case let .project(child, _, _):
@@ -477,7 +477,7 @@ public class QueryCompiler {
             let cmpsVar = uniqueVariable("comparators", parents: parents)
             emitExpressionRewritting(variable: cmpsVar, expr: "Comparators(\(cmps))", result: replacementResultVariable)
             let results = uniqueVariable("results", parents: parents)
-            emit(instruction: .variable(results, "[]"))
+            emit(instruction: .variable(results, "[TermResult]()"))
             try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
             emit(instruction: .assign(results, "sort(\(results), with: \(cmpsVar))"))
             emit(instruction: .forVariableIn(result, results))
@@ -485,11 +485,9 @@ public class QueryCompiler {
             emit(instruction: .close)
         case let .aggregate(child, groups, aggs, state):
             let groupsVar = uniqueVariable("groups", parents: parents)
-            emitExpressionRewritting(variable: groupsVar, expr: "Groups(\(groups))", result: replacementResultVariable)
-            let results = uniqueVariable("results", parents: parents)
-            emit(instruction: .variable(results, "[]"))
+            emitExpressionRewritting(variable: groupsVar, expr: "GroupBy(\(groups))", result: replacementResultVariable)
             let gs = uniqueVariable("groupsData", parents: parents)
-            emit(instruction: .variable(gs, "[:]"))
+            emit(instruction: .variable(gs, "[TermResult:[TermResult]]()"))
             try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
             let g = uniqueVariable("group", parents: parents)
             emit(instruction: .forVariableIn(g, gs))
@@ -497,7 +495,7 @@ public class QueryCompiler {
             for (i, a) in aggs.enumerated() {
                 let aggVar = uniqueVariable("agg\(i)", parents: parents)
                 emitExpressionRewritting(variable: aggVar, expr: "Aggregation(\(a.aggregation))", result: replacementResultVariable)
-                emit(instruction: .assign("\(result)[\"\(a.variableName)\"]", "aggregate(groups[\(g)], \(aggVar))"))
+                emit(instruction: .assign("\(result)[\"\(a.variableName)\"]", "aggregate(\(gs)[\(g)], \(aggVar))"))
             }
             try parents.consume(state: state, resultName: result, depth: depth)
             emit(instruction: .close)
@@ -605,8 +603,9 @@ public class QueryCompiler {
                 emit(instruction: .close)
             }
         case let .project(_, vars, state):
-            emit(instruction: .assign(resultName, "\(resultName).project(\(vars))"))
-            try parents.consume(state: state.projecting(vars), resultName: resultName, depth: depth)
+            let result = uniqueVariable("result", parents: parents)
+            emit(instruction: .constant(result, "\(resultName).project(\(vars))"))
+            try parents.consume(state: state.projecting(vars), resultName: result, depth: depth)
         case let .setDistinct(_, state):
             let set = uniqueVariable("set", parents: parents)
             emit(instruction: .ifCondition("!set.contains(\(resultName))"))
