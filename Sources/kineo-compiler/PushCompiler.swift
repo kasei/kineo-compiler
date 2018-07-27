@@ -66,11 +66,11 @@ public class QueryCompiler {
             hasher.combine(ancestors)
         }
         
-        func consume(state: PartialResultState, depth: Int) throws {
+        func consume(state: PartialResultState, resultName: String, depth: Int) throws {
             if let parent = ancestors.last {
-                try compiler.consume(plan: parent.plan, parents: self.droppingLast(), inPosition: parent.child)
+                try compiler.consume(plan: parent.plan, parents: self.droppingLast(), resultName: resultName, inPosition: parent.child)
             } else {
-                compiler.emit(instruction: .generateResult("result"))
+                compiler.emit(instruction: .generateResult(resultName))
             }
         }
         
@@ -356,17 +356,17 @@ public class QueryCompiler {
         case .joinIdentity:
             let state = PartialResultState(distinct: true, necessarilyBound: [], potentiallyBound: [])
             emit(instruction: .constant("result", "TermResult()"))
-            try parents.consume(state: state, depth: depth)
+            try parents.consume(state: state, resultName: "result", depth: depth)
         case let .table(results, state):
             for r in results {
                 emit(instruction: .constant("result", "\(r)"))
-                try parents.consume(state: state, depth: depth)
+                try parents.consume(state: state, resultName: "result", depth: depth)
             }
         case let .quad(qp, state):
             let qpVar = uniqueVariable("qp", parents: parents)
             emit(instruction: .constant(qpVar, "quad_pattern(\(qp))"))
             emit(instruction: .forVariableIn("result", "match_quad(\(qpVar))"))
-            try parents.consume(state: state, depth: depth)
+            try parents.consume(state: state, resultName: "result", depth: depth)
             emit(instruction: .close)
         case let .bgp(graph, tps, state):
             let bgpVar = uniqueVariable("bgp", parents: parents)
@@ -377,17 +377,17 @@ public class QueryCompiler {
             case .variable(let name, binding: _):
                 emit(instruction: .forVariableIn("result", "match(bgp: \(bgpVar), in: \(name))"))
             }
-            try parents.consume(state: state, depth: depth)
+            try parents.consume(state: state, resultName: "result", depth: depth)
             emit(instruction: .close)
         case let .path(_, subject, pp, object, state):
             let pathVar = uniqueVariable("path", parents: parents)
             emit(instruction: .constant(pathVar, "path_pattern(\(subject), \(pp), \(object))"))
             emit(instruction: .forVariableIn("result", "match_path(\(pathVar))"))
-            try parents.consume(state: state, depth: depth)
+            try parents.consume(state: state, resultName: "result", depth: depth)
             emit(instruction: .close)
         case let .service(endpoint, child, silent, state):
             emit(instruction: .forVariableIn("result", "service(\(endpoint), \(child), \(silent))"))
-            try parents.consume(state: state, depth: depth)
+            try parents.consume(state: state, resultName: "result", depth: depth)
             emit(instruction: .close)
             
         case let .exists(child, _, _, _):
@@ -434,7 +434,7 @@ public class QueryCompiler {
             try produce(plan: child, parents: parents.adding(plan))
             emit(instruction: .assign(results, "sort(\(results), with: \(cmps))"))
             emit(instruction: .forVariableIn("result", results))
-            try parents.consume(state: state, depth: depth)
+            try parents.consume(state: state, resultName: "result", depth: depth)
             emit(instruction: .close)
         case let .aggregate(child, _, aggs, state):
             let results = uniqueVariable("results", parents: parents)
@@ -448,7 +448,7 @@ public class QueryCompiler {
             for a in aggs {
                 emit(instruction: .assign("result[\"\(a.variableName)\"]", "aggregate(groups[\(g)], \(a.aggregation))"))
             }
-            try parents.consume(state: state, depth: depth)
+            try parents.consume(state: state, resultName: "result", depth: depth)
             emit(instruction: .close)
         case let .window(child, groups, windows, _):
             try produce(plan: child, parents: parents.adding(plan))
@@ -461,14 +461,14 @@ public class QueryCompiler {
             emit(instruction: .variable(rowCount, "0"))
             try produce(plan: child, parents: parents.adding(plan))
             emit(instruction: .assign("result", "(\(rowCount) > 0) ? true : false"))
-            try parents.consume(state: state, depth: depth)
+            try parents.consume(state: state, resultName: "result", depth: depth)
         case let .describe(child, _, _), let .construct(child, _, _):
             try produce(plan: child, parents: parents.adding(plan))
             fatalError()
         }
     }
     
-    func consume(plan: Plan, parents: Ancestors, inPosition position: Ancestors.ChildIdentifier = .lhs) throws {
+    func consume(plan: Plan, parents: Ancestors, resultName: String, inPosition position: Ancestors.ChildIdentifier = .lhs) throws {
         switch plan {
         case .empty, .joinIdentity, .quad(_), .bgp(_), .service(_), .path(_):
             fatalError("Plan cannot consume results: \(plan)")
@@ -482,106 +482,106 @@ public class QueryCompiler {
                 // main branch
                 let rowCount = uniqueVariable("rowCount", parents: parents)
                 emit(instruction: .variable(rowCount, "0"))
-                emit(instruction: .literal("// TODO: substitute variables from result into exists pattern:"))
+                emit(instruction: .literal("// TODO: substitute variables from $\(resultName) into exists pattern:"))
                 try produce(plan: exists, parents: parents.adding(plan, inPosition: .rhs))
-                emit(instruction: .assign(name, "result.extend(?\(name), (\(rowCount) > 0) ? true : false)"))
-                try parents.consume(state: state, depth: depth)
+                emit(instruction: .assign(name, "\(resultName).extend(?\(name), (\(rowCount) > 0) ? true : false)"))
+                try parents.consume(state: state, resultName: resultName, depth: depth)
             }
         case let .innerHashJoin(_, _, _, state):
             let nb = state.necessarilyBound
             let ht = uniqueVariable("hashTable", parents: parents)
             if case .lhs = position {
-                emit(instruction: .listAppend("\(ht)[result.project(\(nb))]", "result"))
+                emit(instruction: .listAppend("\(ht)[\(resultName).project(\(nb))]", resultName))
             } else {
-                emit(instruction: .forVariableIn("result", "compatible(result, \(ht)[result.project(\(nb))])"))
-                try parents.consume(state: state, depth: depth)
+                emit(instruction: .forVariableIn(resultName, "compatible(\(resultName), \(ht)[\(resultName).project(\(nb))])"))
+                try parents.consume(state: state, resultName: resultName, depth: depth)
                 emit(instruction: .close)
             }
         case let .leftOuterHashJoin(_, _, expr, _, state):
             let ht = uniqueVariable("hashTable", parents: parents)
             let nb = state.necessarilyBound
             if case .rhs = position {
-                emit(instruction: .listAppend("\(ht)[result.project(\(nb))]", "result"))
+                emit(instruction: .listAppend("\(ht)[\(resultName).project(\(nb))]", resultName))
             } else {
                 emit(instruction: .variable("leftJoinCount", "0"))
                 let m = uniqueVariable("matching", parents: parents)
-                emit(instruction: .constant(m, "compatible(result, \(ht)[result.project(\(nb))])"))
-                emit(instruction: .forVariableIn("result", m))
-                emit(instruction: .ifCondition("eval(result, \(expr))"))
+                emit(instruction: .constant(m, "compatible(\(resultName), \(ht)[\(resultName).project(\(nb))])"))
+                emit(instruction: .forVariableIn(resultName, m))
+                emit(instruction: .ifCondition("eval(\(resultName), \(expr))"))
                 emit(instruction: .increment("leftJoinCount"))
-                try parents.consume(state: state, depth: depth)
+                try parents.consume(state: state, resultName: resultName, depth: depth)
                 emit(instruction: .close)
                 emit(instruction: .close)
                 emit(instruction: .ifCondition("leftJoinCount == 0"))
-                try parents.consume(state: state, depth: depth)
+                try parents.consume(state: state, resultName: resultName, depth: depth)
                 emit(instruction: .close)
             }
         case let .filter(_, expr, state):
-            emit(instruction: .ifCondition("eval(result, \(expr))"))
-            try parents.consume(state: state, depth: depth)
+            emit(instruction: .ifCondition("eval(\(resultName), \(expr))"))
+            try parents.consume(state: state, resultName: resultName, depth: depth)
             emit(instruction: .close)
         case let .union(_, _, state):
-            try parents.consume(state: state, depth: depth)
+            try parents.consume(state: state, resultName: resultName, depth: depth)
         case let .namedGraph(_, _, state):
-            try parents.consume(state: state, depth: depth)
+            try parents.consume(state: state, resultName: resultName, depth: depth)
         case let .extend(_, expr, name, state):
-            emit(instruction: .constant("result", "result.extend(?\(name), \(expr))"))
-            try parents.consume(state: state.addingPotentiallyBound(name), depth: depth)
+            emit(instruction: .constant(resultName, "\(resultName).extend(?\(name), \(expr))"))
+            try parents.consume(state: state.addingPotentiallyBound(name), resultName: resultName, depth: depth)
         case let .minus(_, _, state):
             let ht = uniqueVariable("hashTable", parents: parents)
             let nb = state.necessarilyBound
             if case .rhs = position {
-                emit(instruction: .listAppend("\(ht)[result.project(\(nb))]", "result"))
+                emit(instruction: .listAppend("\(ht)[\(resultName).project(\(nb))]", resultName))
             } else {
                 let m = uniqueVariable("matching", parents: parents)
-                emit(instruction: .constant(m, "compatible(result, \(ht)[result.project(\(nb))])"))
+                emit(instruction: .constant(m, "compatible(\(resultName), \(ht)[\(resultName).project(\(nb))])"))
                 emit(instruction: .ifCondition("matching.count == 0"))
-                try parents.consume(state: state, depth: depth)
+                try parents.consume(state: state, resultName: resultName, depth: depth)
                 emit(instruction: .close)
                 let candidate = uniqueVariable("candidate", parents: parents)
                 emit(instruction: .forVariableIn(candidate, "matching"))
-                emit(instruction: .ifCondition("dom(result).disjointWith(dom(\(candidate)))"))
-                try parents.consume(state: state, depth: depth)
+                emit(instruction: .ifCondition("dom(\(resultName)).disjointWith(dom(\(candidate)))"))
+                try parents.consume(state: state, resultName: resultName, depth: depth)
                 emit(instruction: .close)
                 emit(instruction: .close)
             }
         case let .project(_, vars, state):
-            emit(instruction: .assign("result", "result.project(\(vars))"))
-            try parents.consume(state: state.projecting(vars), depth: depth)
+            emit(instruction: .assign(resultName, "\(resultName).project(\(vars))"))
+            try parents.consume(state: state.projecting(vars), resultName: resultName, depth: depth)
         case let .setDistinct(_, state):
             let set = uniqueVariable("set", parents: parents)
-            emit(instruction: .ifCondition("!set.contains(result)"))
-            emit(instruction: .setInsert(set, "insert(result)"))
-            try parents.consume(state: state, depth: depth)
+            emit(instruction: .ifCondition("!set.contains(\(resultName))"))
+            emit(instruction: .setInsert(set, "insert(\(resultName))"))
+            try parents.consume(state: state, resultName: resultName, depth: depth)
             emit(instruction: .close)
         case let .slice(_, .some(offset), .some(limit), state):
             let rowCount = uniqueVariable("rowCount", parents: parents)
             emit(instruction: .increment(rowCount))
             emit(instruction: .literal("if \(rowCount) <= \(offset) { continue }"))
             emit(instruction: .literal("if \(rowCount) > \(limit+offset) { break }")) // TODO: does this break out far enough?
-            try parents.consume(state: state, depth: depth)
+            try parents.consume(state: state, resultName: resultName, depth: depth)
         case let .slice(_, 0, .some(limit), state), let .slice(_, nil, .some(limit), state):
             let rowCount = uniqueVariable("rowCount", parents: parents)
             emit(instruction: .increment(rowCount))
             emit(instruction: .literal("if \(rowCount) > \(limit) { break }")) // TODO: does this break out far enough?
-            try parents.consume(state: state, depth: depth)
+            try parents.consume(state: state, resultName: resultName, depth: depth)
         case let .slice(_, .some(offset), 0, state), let .slice(_, .some(offset), nil, state):
             let rowCount = uniqueVariable("rowCount", parents: parents)
             emit(instruction: .increment(rowCount))
             emit(instruction: .literal("if \(rowCount) <= \(offset) { continue }"))
-            try parents.consume(state: state, depth: depth)
+            try parents.consume(state: state, resultName: resultName, depth: depth)
         case .order(_, _, _):
             let results = uniqueVariable("results", parents: parents)
-            emit(instruction: .listAppend(results, "result"))
+            emit(instruction: .listAppend(results, resultName))
         case let .aggregate(_, groups, _, _):
             let g = uniqueVariable("group", parents: parents)
             let gs = uniqueVariable("groups", parents: parents)
-            emit(instruction: .constant(g, "result.project(\(groups))"))
-            emit(instruction: .listAppend("\(gs)[\(g)]", "result"))
+            emit(instruction: .constant(g, "\(resultName).project(\(groups))"))
+            emit(instruction: .listAppend("\(gs)[\(g)]", resultName))
         case let .window(child, groups, windows, _):
             fatalError("TODO: implement consume(.window(\(child), \(groups), \(windows)))")
         case let .subquery(_, state):
-            try parents.consume(state: state, depth: depth)
+            try parents.consume(state: state, resultName: resultName, depth: depth)
 
         case .ask(_, _):
             let rowCount = uniqueVariable("rowCount", parents: parents)
