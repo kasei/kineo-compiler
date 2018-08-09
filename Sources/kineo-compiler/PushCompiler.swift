@@ -341,9 +341,9 @@ public class QueryCompiler {
         case .ask:
             return .ask(plan, analysis: state.projecting([]))
         case .construct(_):
-            fatalError()
+            fatalError("TODO: implement CONSTRUCT")
         case .describe(_):
-            fatalError()
+            fatalError("TODO: implement DESCRIBE")
         }
     }
     
@@ -516,10 +516,10 @@ public class QueryCompiler {
             emitExpressionRewritting(variable: describeNodes, expr: "\(nodes)", result: replacementResultVariable)
 
             try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
-            fatalError()
+            fatalError("TODO: implement DESCRIBE")
         case let .construct(child, _, _):
             try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
-            fatalError()
+            fatalError("TODO: implement CONSTRUCT")
         }
     }
     
@@ -647,9 +647,9 @@ public class QueryCompiler {
             emit(instruction: .increment(rowCount))
             emit(instruction: .literal("break"))
         case .describe(_, _, _):
-            fatalError()
+            fatalError("TODO: implement DESCRIBE")
         case .construct(_, _, _):
-            fatalError()
+            fatalError("TODO: implement CONSTRUCT")
         }
     }
 }
