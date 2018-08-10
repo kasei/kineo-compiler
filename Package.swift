@@ -9,7 +9,7 @@ let package = Package(
 		.package(url: "https://github.com/kasei/swift-sparql-syntax.git", from: "0.0.41"),
 		.package(url: "https://github.com/kasei/swift-serd.git", from: "0.0.0"),
 		.package(url: "https://github.com/kasei/kineo.git", from: "0.0.16"),
-		.package(url: "https://github.com/kasei/kineo-federation.git", from: "0.0.1"),
+		.package(url: "https://github.com/kasei/kineo-federation.git", from: "0.0.2"),
     ],
     targets: [
         // Targets are the basic building blocks of a package. A target can define a module or a test suite.
