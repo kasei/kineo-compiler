@@ -1,6 +1,7 @@
 import Foundation
-import Kineo
 import SPARQLSyntax
+import Kineo
+import KineoFederation
 
 func data(fromFileOrString qfile: String) throws -> Data {
     let url = URL(fileURLWithPath: qfile)
@@ -16,12 +17,6 @@ func data(fromFileOrString qfile: String) throws -> Data {
     return data
 }
 
-
-
-
-
-
-
 var verbose = false
 let argscount = CommandLine.arguments.count
 var args = PeekableIterator(generator: CommandLine.arguments.makeIterator())
@@ -32,6 +27,7 @@ guard argscount >= 1 else {
     exit(1)
 }
 
+var endpoints = [URL]()
 var graph = Term(iri: "http://example.org/")
 while true {
     if let next = args.peek() {
@@ -39,6 +35,10 @@ while true {
             _ = args.next()
             if next == "-v" {
                 verbose = true
+                continue
+            } else if next == "-f" {
+                guard let iri = args.next(), let u = URL(string: iri) else { fatalError("No URL value given after -f") }
+                endpoints.append(u)
                 continue
             } else if next == "-g" {
                 guard let iri = args.next() else { fatalError("No IRI value given after -g") }
@@ -52,14 +52,18 @@ while true {
 
 guard let qfile = args.next() else { fatalError("No query file given") }
 
-
 let startTime = getCurrentTime()
 let startSecond = getCurrentDateSeconds()
 
 do {
     let sparql = try data(fromFileOrString: qfile)
     guard var p = SPARQLParser(data: sparql) else { fatalError("Failed to construct SPARQL parser") }
-    let q = try p.parseQuery()
+    var q = try p.parseQuery()
+    if endpoints.count > 0 {
+        let rewriter = FederatingQueryRewriter()
+        q = try rewriter.federatedEquavalent(for: q, endpoints: endpoints)
+    }
+    
     let c = QueryCompiler()
     try c.compile(query: q, activeGraph: graph)
 } catch let e {

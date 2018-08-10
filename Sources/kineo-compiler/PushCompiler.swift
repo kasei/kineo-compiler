@@ -169,11 +169,17 @@ public class QueryCompiler {
         case variable(String, String)
         case generateResult(String)
         case literal(String)
+        case commentBlock(String)
+        case importModule(String)
     }
     
     func emit(instruction: CompilerInstruction) {
         let indent = String(repeating: " ", count: 4*depth)
         switch instruction {
+        case .commentBlock(let c):
+            print("\n\(indent)/**")
+            print("\(c)")
+            print("\(indent)**/\n")
         case .assign(let name, let value):
             print("\(indent)\(name) = \(value)")
         case .forVariableIn(let name, let s):
@@ -204,6 +210,8 @@ public class QueryCompiler {
             print("\(indent)\(s) += 1")
         case .generateResult(let s):
             print("\(indent)GENERATE_RESULT(\(s))")
+        case .importModule(let m):
+            print("import \(m)")
         case .literal(let s):
             print("\(indent)\(s)")
         }
@@ -347,7 +355,15 @@ public class QueryCompiler {
         }
     }
     
+    private func emitPreamble() {
+        emit(instruction: .importModule("Kineo"))
+        emit(instruction: .literal("func GENERATE_RESULT(_ result : TermResult) { print(result) }"))
+        emit(instruction: .literal("func service(_ endpoint : String, _ sparql : String, _ silent : Bool) -> [TermResult] { fatalError(\"SERVICE not implemented\") }"))
+    }
+    
     public func compile(query: Query, activeGraph: Term) throws {
+        emitPreamble()
+        emit(instruction: .commentBlock(query.serialize()))
         let (plan, _) = try queryPlan(for: query, activeGraph: .bound(activeGraph))
         let parents = QueryCompiler.Ancestors(ancestors: [], compiler: self)
         return try produce(plan: plan, parents: parents)
@@ -415,7 +431,13 @@ public class QueryCompiler {
             try parents.consume(state: state, resultName: result, depth: depth)
             emit(instruction: .close)
         case let .service(endpoint, child, silent, state):
-            emit(instruction: .forVariableIn(result, "service(\(endpoint), \(child), \(silent))"))
+            let s = SPARQLSerializer(prettyPrint: false)
+            guard let q = try? Query(form: .select(.star), algebra: child) else {
+                throw QueryError.evaluationError("Failed to serialize SERVICE algebra into SPARQL string")
+            }
+            let sparql = try s.serialize(q.sparqlTokens())
+
+            emit(instruction: .forVariableIn(result, "service(\"\(endpoint)\", \"\(sparql)\", \(silent))"))
             try parents.consume(state: state, resultName: result, depth: depth)
             emit(instruction: .close)
             
@@ -485,7 +507,20 @@ public class QueryCompiler {
             emit(instruction: .close)
         case let .aggregate(child, groups, aggs, state):
             let groupsVar = uniqueVariable("groups", parents: parents)
-            emitExpressionRewritting(variable: groupsVar, expr: "GroupBy(\(groups))", result: replacementResultVariable)
+            var groupVars = [String]()
+            for (i, g) in groups.enumerated() {
+                switch g {
+                case .node(.variable(let name, _)):
+                    groupVars.append(name)
+                default:
+                    let exprVar = uniqueVariable("expr\(i)", parents: parents)
+                    let name = uniqueVariable("result\(i)", parents: parents)
+                    emitExpressionRewritting(variable: exprVar, expr: "Expression(\(g))", result: replacementResultVariable)
+                    groupVars.append(name)
+                }
+            }
+            
+            emitExpressionRewritting(variable: groupsVar, expr: "\(groupVars)", result: replacementResultVariable)
             let gs = uniqueVariable("groupsData", parents: parents)
             emit(instruction: .variable(gs, "[TermResult:[TermResult]]()"))
             try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
@@ -631,7 +666,17 @@ public class QueryCompiler {
         case .order(_, _, _):
             let results = uniqueVariable("results", parents: parents)
             emit(instruction: .listAppend(results, resultName))
-        case .aggregate(_, _, _, _):
+        case let .aggregate(_, groups, _, _):
+            for (i, g) in groups.enumerated() {
+                switch g {
+                case .node(.variable(_, _)):
+                    break
+                default:
+                    let exprVar = uniqueVariable("expr\(i)", parents: parents)
+                    let name = uniqueVariable("result\(i)", parents: parents)
+                    emit(instruction: .constant(resultName, "\(resultName).extend(?\(name), \(exprVar))"))
+                }
+            }
             let groupsVar = uniqueVariable("groups", parents: parents)
             let g = uniqueVariable("group", parents: parents)
             let gs = uniqueVariable("groupsData", parents: parents)
