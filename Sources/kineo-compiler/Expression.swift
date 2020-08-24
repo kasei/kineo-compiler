@@ -87,6 +87,8 @@ extension Expression {
             mapping[name] = child
             let node: Node = .variable(name, binding: true)
             return .node(node)
+        case .window(_):
+            fatalError("removeExists(:mapping:) unimplemented for window functions")
         }
     }
 

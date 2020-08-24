@@ -21,8 +21,8 @@ public class QueryCompiler {
         uniqueVariables = [:]
     }
     
-    func evaluateTable(columns names: [Node], rows: [[Term?]]) throws -> AnyIterator<TermResult> {
-        var results = [TermResult]()
+    func evaluateTable(columns names: [Node], rows: [[Term?]]) throws -> AnyIterator<SPARQLResultSolution<Term>> {
+        var results = [SPARQLResultSolution<Term>]()
         for row in rows {
             var bindings = [String:Term]()
             for (node, term) in zip(names, row) {
@@ -34,7 +34,7 @@ public class QueryCompiler {
                     bindings[name] = term
                 }
             }
-            let result = TermResult(bindings: bindings)
+            let result = SPARQLResultSolution<Term>(bindings: bindings)
             results.append(result)
         }
         return AnyIterator(results.makeIterator())
@@ -136,7 +136,7 @@ public class QueryCompiler {
         
         case empty(analysis: PartialResultState)
         case joinIdentity(analysis: PartialResultState)
-        case table([TermResult], analysis: PartialResultState)
+        case table([SPARQLResultSolution<Term>], analysis: PartialResultState)
         case quad(QuadPattern, analysis: PartialResultState)
         case bgp(Node, [TriplePattern], analysis: PartialResultState)
         case path(Node, Node, PropertyPath, Node, analysis: PartialResultState)
@@ -279,10 +279,12 @@ public class QueryCompiler {
             let (c, _) = try queryPlan(for: child, activeGraph: activeGraph)
             let state = PartialResultState(distinct: false, necessarilyBound:algebra.necessarilyBound, potentiallyBound: algebra.inscope)
             return (.aggregate(c, groups, aggs, analysis: state), state)
-        case let .window(child, groups, windows):
-            fatalError("TODO: implement queryPlan(for: .window(\(child), \(groups), \(windows)))")
+        case let .window(child, functionMappings):
+            fatalError("TODO: implement queryPlan(for: .window(\(child), \(functionMappings)))")
         case let .subquery(q):
             return try queryPlan(for: q, activeGraph: activeGraph)
+        case .reduced(_):
+            fatalError("queryPlan(for:activeGraph:) unimplemented for .reduced")
         }
     }
 
@@ -323,7 +325,7 @@ public class QueryCompiler {
             break
         case .joinIdentity:
             let state = PartialResultState(distinct: true, necessarilyBound: [], potentiallyBound: [])
-            emit(instruction: .constant(result, .emptyStruct("TermResult")))
+            emit(instruction: .constant(result, .emptyStruct("SPARQLResultSolution<Term>")))
             try parents.consume(state: state, resultName: result.value)
         case let .table(results, state):
             for r in results {
@@ -383,14 +385,14 @@ public class QueryCompiler {
             try produce(plan: child, parents: parents.adding(plan, inPosition: .lhs), replacementResultVariable: replacementResultVariable)
         case let .innerHashJoin(lhs, rhs, _, _):
             let ht = uniqueVariable("hashTable", parents: parents)
-            emit(instruction: .variable(ht, .emptyDictionary("[TermResult:[TermResult]]")))
+            emit(instruction: .variable(ht, .emptyDictionary("[SPARQLResultSolution<Term>:[SPARQLResultSolution<Term>]]")))
             try produce(plan: lhs, parents: parents.adding(plan, inPosition: .lhs), replacementResultVariable: replacementResultVariable)
             try produce(plan: rhs, parents: parents.adding(plan, inPosition: .rhs), replacementResultVariable: replacementResultVariable)
         case let .leftOuterHashJoin(lhs, rhs, expr, _, _):
             let exprVar = uniqueVariable("expr", parents: parents)
             emitExpressionRewritting(variable: exprVar.value, expr: .literal_expr_TODO("Expression(\(expr))"), result: replacementResultVariable)
             let ht = uniqueVariable("hashTable", parents: parents)
-            emit(instruction: .variable(ht, .emptyDictionary("[TermResult:[TermResult]]")))
+            emit(instruction: .variable(ht, .emptyDictionary("[SPARQLResultSolution<Term>:[SPARQLResultSolution<Term>]]")))
             try produce(plan: rhs, parents: parents.adding(plan, inPosition: .rhs), replacementResultVariable: replacementResultVariable)
             try produce(plan: lhs, parents: parents.adding(plan, inPosition: .lhs), replacementResultVariable: replacementResultVariable)
         case let .filter(child, expr, _):
@@ -420,14 +422,14 @@ public class QueryCompiler {
             try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
         case let .minus(lhs, rhs, _):
             let ht = uniqueVariable("hashTable", parents: parents)
-            emit(instruction: .variable(ht, .emptyDictionary("[TermResult:[TermResult]]")))
+            emit(instruction: .variable(ht, .emptyDictionary("[SPARQLResultSolution<Term>:[SPARQLResultSolution<Term>]]")))
             try produce(plan: rhs, parents: parents.adding(plan, inPosition: .rhs), replacementResultVariable: replacementResultVariable)
             try produce(plan: lhs, parents: parents.adding(plan, inPosition: .lhs), replacementResultVariable: replacementResultVariable)
         case let .project(child, _, _):
             try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
         case let .setDistinct(child, _):
             let set = uniqueVariable("set", parents: parents)
-            emit(instruction: .variable(set, .emptySet("TermResult")))
+            emit(instruction: .variable(set, .emptySet("SPARQLResultSolution<Term>")))
             try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
         case let .slice(child, _, _, _):
             let rowCount = uniqueVariable("rowCount", parents: parents)
@@ -437,7 +439,7 @@ public class QueryCompiler {
             let cmpsVar = uniqueVariable("comparators", parents: parents)
             emitExpressionRewritting(variable: cmpsVar.value, expr: .literal_expr_TODO("Comparators(\(cmps))"), result: replacementResultVariable)
             let results = uniqueVariable("results", parents: parents)
-            emit(instruction: .variable(results, .emptyList("TermResult")))
+            emit(instruction: .variable(results, .emptyList("SPARQLResultSolution<Term>")))
             try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
             emit(instruction: .assign(results, .identifier("sort(\(results), with: \(cmpsVar))")))
             emit(instruction: .forVariableIn(result, results))
@@ -460,7 +462,7 @@ public class QueryCompiler {
             
             emitExpressionRewritting(variable: groupsVar.value, expr: .literal_expr_TODO("\(groupVars)"), result: replacementResultVariable)
             let gs = uniqueVariable("groupsData", parents: parents)
-            emit(instruction: .variable(gs, .emptyDictionary("[TermResult:[TermResult]]")))
+            emit(instruction: .variable(gs, .emptyDictionary("[SPARQLResultSolution<Term>:[SPARQLResultSolution<Term>]]")))
             try produce(plan: child, parents: parents.adding(plan), replacementResultVariable: replacementResultVariable)
             let g = uniqueVariable("group", parents: parents)
             emit(instruction: .forVariableIn(g, gs))
@@ -657,6 +659,10 @@ public class QueryCompiler {
             fatalError("TODO: implement DESCRIBE")
         case .construct(_, _, _):
             fatalError("TODO: implement CONSTRUCT")
+        case .table(_, analysis: let analysis):
+            fatalError("consume(plan:parents:resultName:inPosition:) unimplemented for .table")
+        case .slice(_, .none, .none, analysis: let analysis):
+            fatalError("consume(plan:parents:resultName:inPosition:) unimplemented for .slice")
         }
     }
 }

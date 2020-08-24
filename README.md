@@ -19,7 +19,7 @@ LIMIT 2
 % ./.build/debug/kineo-compiler -g http://example.org/default-graph/ test.rq
 var rowCount_1 = 0
 let groups_3 = GroupBy([?s])
-var groupsData_3 = [TermResult:[TermResult]]()
+var groupsData_3 = [SPARQLResultSolution<Term>:[SPARQLResultSolution<Term>]]()
 let bgp_4 = bgp_pattern([?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?type ., ?s <http://xmlns.com/foaf/0.1/name> ?name ., ?s <http://xmlns.com/foaf/0.1/nick> ?nick .])
 for result_4 in match(bgp: bgp_4, in: <http://example.org/>) {
     let group_3 = result_4.project(groups_3)

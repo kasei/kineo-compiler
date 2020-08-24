@@ -81,8 +81,8 @@ public struct SwiftInstructionWriter : InstructionWriter {
     
     mutating public func emitPreamble() {
         emit(instruction: .importModule(.identifier("Kineo")))
-        print("func GENERATE_RESULT(_ result : TermResult) { print(result) }")
-        print("func service(_ endpoint : String, _ sparql : String, _ silent : Bool) -> [TermResult] { fatalError(\"SERVICE not implemented\") }")
+        print("func GENERATE_RESULT(_ result : SPARQLResultSolution<Term>) { print(result) }")
+        print("func service(_ endpoint : String, _ sparql : String, _ silent : Bool) -> [SPARQLResultSolution<Term>] { fatalError(\"SERVICE not implemented\") }")
     }
     
     mutating public func emit(instruction: CompilerStatement) {
